@@ -3,6 +3,65 @@ import { AppError, ErrorCodes, handleApiError, logger } from '@/lib/utils/errors
 import { env, graphqlQuerySchema } from '@/lib/utils/validation'
 import type { ShopifyGraphQLResponse } from '@/types/shopify'
 
+// List of sensitive fields to completely remove from API response
+const SENSITIVE_FIELDS = new Set([
+  'email',
+  'phone',
+  'firstname',
+  'lastname',
+  'displayname',
+  'address1',
+  'address2',
+  'company',
+])
+
+// Fields to remove only when inside address context
+const ADDRESS_NAME_FIELD = 'name'
+
+// Recursively remove sensitive fields from response data
+function removeSensitiveData(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj
+  if (Array.isArray(obj)) return obj.map(removeSensitiveData)
+  if (typeof obj !== 'object') return obj
+
+  const record = obj as Record<string, unknown>
+  const cleaned: Record<string, unknown> = {}
+
+  // Check if this object is an address context
+  const siblingKeys = Object.keys(record).map((k) => k.toLowerCase())
+  const isAddressContext = siblingKeys.some((k) =>
+    ['address1', 'address2', 'city', 'province', 'zip', 'country'].includes(k)
+  )
+
+  for (const [key, value] of Object.entries(record)) {
+    const lowerKey = key.toLowerCase()
+
+    // Skip sensitive fields entirely
+    if (SENSITIVE_FIELDS.has(lowerKey)) {
+      continue
+    }
+
+    // Skip name field only in address context (but keep order name like #1234)
+    if (
+      lowerKey === ADDRESS_NAME_FIELD &&
+      typeof value === 'string' &&
+      !value.startsWith('#') &&
+      isAddressContext
+    ) {
+      continue
+    }
+
+    // Recursively process nested objects
+    if (typeof value === 'object') {
+      cleaned[key] = removeSensitiveData(value)
+    } else {
+      cleaned[key] = value
+    }
+  }
+
+  return cleaned
+}
+
 // CORS headers configuration
 const corsHeaders = {
   'Access-Control-Allow-Origin': env.NEXT_PUBLIC_ALLOWED_ORIGINS || '*',
@@ -138,8 +197,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Return successful response
-    return NextResponse.json(shopifyData, {
+    // Remove sensitive customer data before returning to client
+    const cleanedData = removeSensitiveData(shopifyData)
+
+    // Return successful response with cleaned data
+    return NextResponse.json(cleanedData, {
       headers: corsHeaders,
     })
   } catch (error) {
